@@ -1,0 +1,926 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="description" content="17 ways PostgreSQL's write-ahead log fails, with a live simulator, diagnostics and fixes.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="WAL Failure Atlas">
+<meta property="og:description" content="17 ways PostgreSQL's write-ahead log fails, with a live simulator, diagnostics and fixes.">
+<style>body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>WAL Failure Atlas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+/* Layout: masthead, four-gate strip, then a workbench: scenario list on the left, live pipeline console above the diagnosis on the right. Dark navy first, with a light "blueprint" variant. */
+:root{
+  color-scheme:dark;
+  --bg:#0a1324;
+  --panel:#0f1b33;
+  --panel-2:#14233f;
+  --sunken:#070e1c;
+  --ink:#e8eefa;
+  --ink-2:#a3b4d0;
+  --ink-3:#7387a8;
+  --line:#1d2e4f;
+  --line-2:#2b4167;
+  --accent:#5aaaf0;
+  --accent-soft:#12315a;
+  --ok:#4cd0a0;
+  --ok-soft:#0f3a30;
+  --hold:#f2b84b;
+  --hold-soft:#3a2c0d;
+  --panic:#ff7e6e;
+  --panic-soft:#41171a;
+  --idle:#34496d;
+  --shadow:0 1px 0 rgba(255,255,255,.03) inset,0 18px 40px -22px rgba(0,0,0,.85);
+  --display:"Bricolage Grotesque","Helvetica Neue",Arial,sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){
+    color-scheme:light;
+    --bg:#edf2fa;
+    --panel:#ffffff;
+    --panel-2:#f3f6fc;
+    --sunken:#e4ebf6;
+    --ink:#0b1a33;
+    --ink-2:#465a7b;
+    --ink-3:#6b7e9e;
+    --line:#d3dded;
+    --line-2:#b7c6de;
+    --accent:#245f9c;
+    --accent-soft:#d9e8f8;
+    --ok:#0d7a58;
+    --ok-soft:#d2efe4;
+    --hold:#975800;
+    --hold-soft:#f8e7c6;
+    --panic:#b3261e;
+    --panic-soft:#fadad6;
+    --idle:#a9b9d3;
+    --shadow:0 1px 2px rgba(11,26,51,.06),0 14px 30px -18px rgba(11,26,51,.28);
+  }
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#edf2fa;
+  --panel:#ffffff;
+  --panel-2:#f3f6fc;
+  --sunken:#e4ebf6;
+  --ink:#0b1a33;
+  --ink-2:#465a7b;
+  --ink-3:#6b7e9e;
+  --line:#d3dded;
+  --line-2:#b7c6de;
+  --accent:#245f9c;
+  --accent-soft:#d9e8f8;
+  --ok:#0d7a58;
+  --ok-soft:#d2efe4;
+  --hold:#975800;
+  --hold-soft:#f8e7c6;
+  --panic:#b3261e;
+  --panic-soft:#fadad6;
+  --idle:#a9b9d3;
+  --shadow:0 1px 2px rgba(11,26,51,.06),0 14px 30px -18px rgba(11,26,51,.28);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:var(--body);font-size:15.5px;line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1240px;margin:0 auto;padding-inline:clamp(16px,4vw,32px);padding-block:0 72px}
+code,.mn{font-family:var(--mono);font-size:.88em}
+
+/* ---------- masthead ---------- */
+.masthead{padding-block:56px 40px;display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:40px;align-items:end;border-bottom:1px solid var(--line)}
+.eyebrow{font-family:var(--mono);font-size:11.5px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin:0 0 18px}
+h1{font-family:var(--display);font-weight:800;font-size:clamp(38px,7vw,72px);line-height:.98;letter-spacing:-.03em;margin:0;text-wrap:balance}
+h1 em{font-style:normal;color:var(--accent)}
+.thesis{font-size:clamp(16px,1.9vw,18.5px);line-height:1.55;color:var(--ink-2);margin:0;max-width:56ch}
+.thesis strong{color:var(--ink);font-weight:600}
+.facts{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+.fact{font-family:var(--mono);font-size:11.5px;letter-spacing:.04em;color:var(--ink-2);border:1px solid var(--line-2);padding:5px 10px;border-radius:999px;background:var(--panel)}
+.fact b{color:var(--ink);font-weight:600}
+
+/* ---------- sections ---------- */
+.sec{padding-block:44px}
+.sec-head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:8px}
+h2{font-family:var(--display);font-weight:800;font-size:clamp(22px,3vw,30px);letter-spacing:-.02em;margin:0;text-wrap:balance}
+.tag{font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+.sec-note{color:var(--ink-2);max-width:70ch;margin:0 0 26px;font-size:15px}
+
+/* ---------- four gates ---------- */
+.gates{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;counter-reset:gate}
+.gate{background:var(--panel);border:1px solid var(--line);border-top:2px solid var(--accent);border-radius:4px;padding:18px 18px 20px;position:relative}
+.gate .lab{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+.gate h3{font-family:var(--display);font-weight:600;font-size:18px;letter-spacing:-.01em;margin:0 0 8px}
+.gate p{margin:0;font-size:14.5px;line-height:1.55;color:var(--ink-2)}
+.gate code{color:var(--ink)}
+
+/* ---------- workbench ---------- */
+.bench{display:grid;grid-template-columns:300px minmax(0,1fr);gap:28px;align-items:start}
+.list{position:sticky;top:calc(env(safe-area-inset-top,0px) + 14px);max-height:calc(100vh - 36px);overflow-y:auto;padding-right:4px;min-width:0}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 16px;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block}
+.dot.sev-out{background:var(--panic)}
+.dot.sev-deg{background:var(--hold)}
+.dot.sev-risk{background:var(--accent)}
+.grp + .grp{margin-top:20px}
+.grp h3{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-3);margin:0 0 8px}
+.items{display:flex;flex-direction:column;gap:2px}
+.item{display:flex;align-items:flex-start;gap:11px;width:100%;text-align:left;padding:10px 11px;border:1px solid transparent;border-radius:4px;background:transparent;color:var(--ink-2);font-family:var(--body);font-size:14px;font-weight:500;line-height:1.35;cursor:pointer;transition:background .13s,border-color .13s,color .13s}
+.item .dot{margin-top:6px}
+.item:hover{background:var(--panel);color:var(--ink)}
+.item:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.item[aria-current="true"]{background:var(--panel);border-color:var(--line-2);color:var(--ink);box-shadow:var(--shadow)}
+
+.stack{display:flex;flex-direction:column;gap:22px;min-width:0}
+
+/* ---------- console ---------- */
+.console{background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:var(--shadow);overflow:hidden}
+.bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 16px;background:var(--panel-2);border-bottom:1px solid var(--line)}
+.pill{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;padding:5px 11px;border-radius:999px;border:1px solid currentColor}
+.pill i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.pill.ok{color:var(--ok);background:var(--ok-soft)}
+.pill.hold{color:var(--hold);background:var(--hold-soft)}
+.pill.panic{color:var(--panic);background:var(--panic-soft)}
+.now{font-family:var(--mono);font-size:12px;color:var(--ink-3);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 140px}
+.btns{display:flex;gap:8px;flex-wrap:wrap}
+.btn{font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;padding:7px 13px;border-radius:4px;cursor:pointer;border:1px solid var(--line-2);background:transparent;color:var(--ink-2);transition:border-color .14s,color .14s,background .14s}
+.btn:hover{border-color:var(--ink-3);color:var(--ink)}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#06182f}
+.btn.primary:hover{filter:brightness(1.08);color:#06182f}
+:root[data-theme="light"] .btn.primary,:root[data-theme="light"] .btn.primary:hover{color:#ffffff}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]) .btn.primary,:root:not([data-theme="dark"]) .btn.primary:hover{color:#ffffff}}
+.btn[disabled]{opacity:.4;cursor:not-allowed;filter:none}
+
+.lanes{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;background:var(--line);border-bottom:1px solid var(--line)}
+.lane{background:var(--panel);padding:13px 12px 12px;text-align:center;min-width:0}
+.lane .nm{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+.lane .ct{font-family:var(--mono);font-size:24px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink);line-height:1.25;margin:3px 0 2px}
+.lane .st{font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--ok)}
+.lane.blocked{background:var(--hold-soft)}
+.lane.blocked .ct,.lane.blocked .st{color:var(--hold)}
+.lane.dead{background:var(--panic-soft)}
+.lane.dead .ct,.lane.dead .st{color:var(--panic)}
+
+.readouts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border-bottom:1px solid var(--line)}
+.ro{background:var(--panel);padding:13px 16px;min-width:0}
+.ro .k,.k{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3)}
+.ro .k{margin-bottom:5px}
+.ro .v{font-family:var(--mono);font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink);line-height:1.25;overflow-wrap:anywhere}
+.ro .v.warn{color:var(--hold)}
+.ro .v.bad{color:var(--panic)}
+
+.gauge-wrap{padding:16px 16px 4px}
+.gauge-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:8px}
+.gauge-head .n{font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
+.gauge{height:10px;background:var(--sunken);border-radius:999px;overflow:hidden}
+.gauge-fill{height:100%;width:0;background:var(--accent);border-radius:999px;transition:width .3s linear,background .3s}
+.gauge-fill.warn{background:var(--hold)}
+.gauge-fill.bad{background:var(--panic)}
+
+.tape-wrap{padding:14px 16px 18px}
+.tape-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:9px}
+.tape-head .n{font-family:var(--mono);font-size:12px;color:var(--ink-3)}
+.tape{display:flex;gap:2px;align-items:flex-end;min-height:48px;padding:9px;background:var(--sunken);border-radius:4px;overflow-x:auto;overflow-y:hidden}
+.seg{flex:none;width:10px;height:28px;border-radius:2px;background:var(--idle);transition:background .25s,height .25s,opacity .25s}
+.seg.s1{background:var(--accent);opacity:.3}
+.seg.s2{background:var(--accent);opacity:.5}
+.seg.s3{background:var(--accent);opacity:.75}
+.seg.s4{background:var(--accent);opacity:1}
+.seg.held{background:var(--hold);opacity:1;height:36px}
+.seg.corrupt{background:var(--panic);opacity:1;height:42px}
+.tape-empty{font-family:var(--mono);font-size:12px;color:var(--ink-3);padding:6px 2px;flex:none}
+
+/* ---------- detail ---------- */
+.detail{background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:var(--shadow);overflow:hidden}
+.d-head{padding:24px 26px 22px}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.chip{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:4px 10px;border-radius:999px;border:1px solid var(--line-2);color:var(--ink-3)}
+.chip.sev-out{color:var(--panic);border-color:var(--panic);background:var(--panic-soft)}
+.chip.sev-deg{color:var(--hold);border-color:var(--hold);background:var(--hold-soft)}
+.chip.sev-risk{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.d-head h3{font-family:var(--display);font-weight:800;font-size:clamp(22px,2.8vw,30px);letter-spacing:-.02em;line-height:1.1;margin:0 0 12px;text-wrap:balance}
+.d-head p{margin:0;font-size:16px;line-height:1.6;color:var(--ink-2);max-width:64ch}
+.block{padding:22px 26px;border-top:1px solid var(--line)}
+.block > .k{margin-bottom:12px}
+.block code,.fixlist code{background:var(--panel-2);border:1px solid var(--line);padding:1px 5px;border-radius:3px;color:var(--ink)}
+
+.log{font-family:var(--mono);font-size:12.5px;line-height:1.75;background:var(--sunken);border-left:3px solid var(--panic);padding:13px 15px;border-radius:0 4px 4px 0;color:var(--ink);overflow-x:auto;white-space:pre;margin:0}
+.log.quiet{border-left-color:var(--idle);color:var(--ink-2)}
+.code{position:relative;background:var(--sunken);border:1px solid var(--line);border-radius:4px}
+.code pre{margin:0;padding:15px 16px;padding-right:76px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.7;color:var(--ink)}
+.copy{position:absolute;top:8px;right:8px;font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;padding:5px 9px;border:1px solid var(--line-2);border-radius:4px;background:var(--panel);color:var(--ink-3);cursor:pointer}
+.copy:hover{color:var(--ink);border-color:var(--ink-3)}
+.copy:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.fixlist{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:12px}
+.fixlist li{display:flex;gap:12px;font-size:15.5px;line-height:1.6;color:var(--ink-2)}
+.fixlist li::before{content:"\2192";font-family:var(--mono);color:var(--accent);flex:none;padding-top:1px}
+.fixlist li > span{min-width:0}
+.fixlist strong{color:var(--ink);font-weight:600}
+.trap{background:var(--panic-soft);border:1px solid var(--panic);border-radius:4px;padding:15px 17px;display:flex;gap:12px;align-items:flex-start}
+.trap .mark{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--panic);flex:none;padding-top:1px}
+.trap p{margin:0;font-size:15px;line-height:1.6;color:var(--ink);min-width:0}
+
+.foot{border-top:1px solid var(--line);padding-block:30px 0;margin-top:20px}
+.foot p{margin:0 0 10px;font-size:14px;line-height:1.6;color:var(--ink-3);max-width:72ch}
+.foot p:last-child{margin-bottom:0}
+.foot strong{color:var(--ink-2)}
+
+@media (max-width:960px){
+  .masthead{grid-template-columns:1fr;gap:24px;padding-block:40px 32px}
+  .bench{grid-template-columns:1fr;gap:22px}
+  .list{position:static;max-height:none;padding-right:0}
+  .items{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:4px}
+}
+@media (max-width:560px){
+  .lanes{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .lanes .lane:last-child{grid-column:span 2}
+  .d-head,.block{padding-inline:18px}
+  .items{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition-duration:.001ms!important;animation-duration:.001ms!important}
+}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div>
+    <p class="eyebrow">PostgreSQL &middot; write-ahead log</p>
+    <h1>Every way the <em>WAL</em> breaks</h1>
+  </div>
+  <div>
+    <p class="thesis">Every part of PostgreSQL depends on the write-ahead log, and <strong>four independent consumers</strong> decide when a segment can go. Almost every WAL incident is the same story: <strong>one consumer stopped, and nobody was watching the log pile up.</strong></p>
+    <div class="facts">
+      <span class="fact"><b>17</b> failure modes</span>
+      <span class="fact"><b>4</b> gates</span>
+      <span class="fact">PostgreSQL <b>13&ndash;17</b></span>
+    </div>
+  </div>
+</header>
+
+<section class="sec">
+  <div class="sec-head"><h2>The four gates</h2><span class="tag">why a 16 MB file won&rsquo;t go away</span></div>
+  <p class="sec-note">WAL is written as 16 MB segment files in <code>pg_wal/</code>. A segment can be recycled only when all four gates below have finished with it. The slowest gate sets the size of your log directory.</p>
+  <div class="gates">
+    <div class="gate">
+      <div class="lab">Gate 1</div>
+      <h3>Checkpoint</h3>
+      <p>Redo must have advanced past the segment. Until dirty pages are written, the segment is still needed for crash recovery.</p>
+    </div>
+    <div class="gate">
+      <div class="lab">Gate 2</div>
+      <h3>Archiver</h3>
+      <p>With <code>archive_mode</code> on, the segment must ship successfully. A failing <code>archive_command</code> holds every segment behind it.</p>
+    </div>
+    <div class="gate">
+      <div class="lab">Gate 3</div>
+      <h3>Replication slots</h3>
+      <p>Each slot&rsquo;s <code>restart_lsn</code> pins the log. A slot whose consumer is gone pins it permanently, and slots survive restarts.</p>
+    </div>
+    <div class="gate">
+      <div class="lab">Gate 4</div>
+      <h3>wal_keep_size</h3>
+      <p>A fixed floor of retained WAL for standbys without slots. A deliberate reserve, not a safety net for the other three.</p>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="bench">
+  <div class="sec-head"><h2>Break it yourself</h2><span class="tag">simulated &middot; 16 MB segments &middot; 2 GB pg_wal</span></div>
+  <p class="sec-note">Pick a failure. Segments flow through five stages; when a gate stalls, watch where they stack up and how long until the disk fills. Then apply the fix and watch it drain.</p>
+
+  <div class="bench">
+    <nav class="list" id="list" aria-label="Failure scenarios"></nav>
+
+    <div class="stack">
+      <div class="console" id="console">
+        <div class="bar">
+          <span class="pill ok" id="pill" role="status"><i></i><span id="pill-text">Healthy</span></span>
+          <span class="now" id="now"></span>
+          <span class="btns">
+            <button class="btn" id="btn-play" type="button">Pause</button>
+            <button class="btn primary" id="btn-fix" type="button">Apply fix</button>
+            <button class="btn" id="btn-reset" type="button">Reset</button>
+          </span>
+        </div>
+        <div class="lanes" id="lanes"></div>
+        <div class="readouts">
+          <div class="ro"><div class="k">Current LSN</div><div class="v" id="r-lsn">0/23000000</div></div>
+          <div class="ro"><div class="k">Oldest held segment</div><div class="v" id="r-seg">&mdash;</div></div>
+          <div class="ro"><div class="k">Segments retained</div><div class="v" id="r-count">0</div></div>
+          <div class="ro"><div class="k">Commit latency</div><div class="v" id="r-lat">1.8 ms</div></div>
+        </div>
+        <div class="gauge-wrap">
+          <div class="gauge-head"><span class="k">pg_wal usage</span><span class="n" id="g-text">0 MB / 2048 MB</span></div>
+          <div class="gauge"><div class="gauge-fill" id="g-fill"></div></div>
+        </div>
+        <div class="tape-wrap">
+          <div class="tape-head"><span class="k">Segment tape</span><span class="n" id="t-note">flowing</span></div>
+          <div class="tape" id="tape" role="img" aria-label="WAL segment pipeline state"></div>
+        </div>
+      </div>
+
+      <article class="detail" id="detail"></article>
+    </div>
+  </div>
+</section>
+
+<footer class="foot">
+  <p><strong>On the simulation:</strong> segment counts, fill rate and latency are illustrative, not a model of your instance. The log lines, catalog views and settings are real: they are what you will see and run.</p>
+  <p>Diagnostics assume PostgreSQL 13 or later. Scenario links work: add <code>#dead-slot</code> or any scenario key to the address. <code>pg_stat_checkpointer</code> is PostgreSQL 17+; on earlier versions the same counters live in <code>pg_stat_bgwriter</code>.</p>
+</footer>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var STAGES = ["write","flush","archive","stream","recycle"];
+  var STAGE_LABEL = {write:"Write",flush:"Flush",archive:"Archive",stream:"Stream",recycle:"Recycle"};
+  var CAP_MB = 2048, SEG_MB = 16, CAP_SEGS = CAP_MB / SEG_MB;
+  var G_SPACE = "pg_wal grows without bound";
+  var G_LAT = "Commits slow or hang";
+  var G_REP = "Primary and replica";
+  var G_INT = "Integrity and recovery";
+
+  var SCENARIOS = [
+    {
+      key:"archive-fail", group:G_SPACE, name:"archive_command is failing",
+      sev:"outage", severity:"Outage in ~30 min", gate:"archive", mode:"retain",
+      blurb:"The archiver cannot ship segments, so it keeps every one of them. This is silent until the disk is gone — the database looks perfectly healthy right up until it PANICs.",
+      log:'LOG:  archive command failed with exit code 1\nDETAIL:  The failed archive command was: rsync pg_wal/0000000100000000000000A4 backup:/wal/\nWARNING:  archiving write-ahead log file "0000000100000000000000A4" failed too many times, will try again later',
+      sql:"-- Is the archiver failing, and since when?\nSELECT archived_count, last_archived_wal, last_archived_time,\n       failed_count, last_failed_wal, last_failed_time\nFROM pg_stat_archiver;\n\n-- How many segments are queued waiting to ship?\nSELECT count(*) AS ready_to_archive\nFROM pg_ls_dir('pg_wal/archive_status') AS f\nWHERE f LIKE '%.ready';",
+      fixes:[
+        "<strong>Fix the destination, not the symptom.</strong> Full archive target, expired credentials, DNS, a changed mount — the exit code tells you which.",
+        "Once <code>archive_command</code> succeeds again the backlog drains on its own. Do not help it along by deleting files.",
+        "Make <code>archive_command</code> <strong>fail loudly and refuse to overwrite</strong>. A command that returns 0 without copying silently destroys your ability to do point-in-time recovery.",
+        "Alert on <code>pg_stat_archiver.last_failed_time</code>, not on disk usage. Disk usage tells you when it is already too late."
+      ],
+      trap:"An <code>archive_command</code> that overwrites an existing file on retry can corrupt the archive itself. Guard it with <code>test ! -f</code> before the copy."
+    },
+    {
+      key:"dead-slot", group:G_SPACE, name:"An inactive replication slot",
+      sev:"outage", severity:"Outage — timing unpredictable", gate:"stream", mode:"retain",
+      blurb:"A slot guarantees the primary keeps WAL until its consumer has read it. If the consumer is gone and nobody drops the slot, that guarantee becomes a suicide pact. This is the single most common cause of a surprise WAL disk-full.",
+      log:'-- There is no error. That is the entire problem.\n-- The first symptom is the PANIC, hours or days later.',
+      quietLog:true,
+      sql:"-- Every slot, and exactly how much WAL each one pins\nSELECT slot_name, slot_type, active, wal_status,\n       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn))\n         AS retained_wal,\n       pg_size_pretty(safe_wal_size) AS headroom_left\nFROM pg_replication_slots\nORDER BY pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) DESC;",
+      fixes:[
+        "If the consumer is genuinely gone: <code>SELECT pg_drop_replication_slot('slot_name');</code> — space is released at the next checkpoint.",
+        "<strong>Set <code>max_slot_wal_keep_size</code>.</strong> It converts 'the primary dies' into 'one standby needs rebuilding'. That is the right trade almost every time.",
+        "Watch <code>wal_status</code>: <code>reserved</code> → <code>extended</code> → <code>unreserved</code> → <code>lost</code>. Anything past <code>reserved</code> deserves a page.",
+        "Logical slots are worse than physical ones — an idle logical subscriber pins WAL <em>and</em> holds back the catalog xmin, which blocks vacuum."
+      ],
+      trap:"Slots are persistent. Deleting a standby does not delete its slot, and the slot someone created for a migration two months ago is still pinning your log right now."
+    },
+    {
+      key:"disk-full", group:G_SPACE, name:"pg_wal is full — PANIC",
+      sev:"outage", severity:"Total outage", gate:"archive", mode:"retain", startFull:true,
+      blurb:"The terminal state of every retention scenario. PostgreSQL cannot guarantee durability if it cannot write WAL, so it does the only safe thing: it PANICs and shuts down. It will not start again until there is room.",
+      log:'PANIC:  could not write to file "pg_wal/xlogtemp.31415": No space left on device\nLOG:  WAL writer process (PID 31415) was terminated by signal 6: Aborted\nLOG:  terminating any other active server processes\nLOG:  database system is shut down',
+      sql:"-- From the shell, before anything else:\n--   df -h $PGDATA/pg_wal\n--   du -sh $PGDATA/pg_wal\n\n-- Then find which gate is holding the log:\nSELECT 'slots' AS gate, count(*) FILTER (WHERE NOT active) AS stuck\n  FROM pg_replication_slots\nUNION ALL\nSELECT 'archiver', (SELECT failed_count FROM pg_stat_archiver);",
+      fixes:[
+        "<strong>Never delete files from pg_wal by hand.</strong> You will remove a segment crash recovery needs and turn a two-hour outage into a restore from backup.",
+        "Reclaim space elsewhere first — a ballast file you pre-allocated for exactly this, logs, old snapshots. Enough to start the server is enough.",
+        "Start the server, then remove the blocking gate. Space comes back at the following checkpoint, not instantly.",
+        "If you must clean up WAL, run <code>pg_archivecleanup</code> against the <em>archive</em>, which knows what is still needed."
+      ],
+      trap:"Keep a 1 GB ballast file on the WAL volume in production. Deleting it buys you the ten minutes you need to fix the real cause calmly."
+    },
+    {
+      key:"checkpoint-storm", group:G_SPACE, name:"Checkpoints firing too often",
+      sev:"degraded", severity:"Degraded — latency saw-tooth", gate:null, mode:"slow", latency:210,
+      blurb:"When max_wal_size is too small for the write rate, PostgreSQL forces a checkpoint before the timed one is due. Each forced checkpoint dumps dirty buffers and resets full-page writes, so WAL volume and IO both spike — which triggers the next checkpoint sooner.",
+      log:'LOG:  checkpoints are occurring too frequently (17 seconds apart)\nHINT:  Consider increasing the configuration parameter "max_wal_size".',
+      sql:"-- Requested (forced) vs timed checkpoints. Requested should be near zero.\nSELECT num_timed, num_requested,\n       round(100.0 * num_requested\n             / nullif(num_timed + num_requested, 0), 1) AS pct_forced,\n       write_time, sync_time, buffers_written\nFROM pg_stat_checkpointer;   -- pg_stat_bgwriter before PG17",
+      fixes:[
+        "Raise <code>max_wal_size</code> until <code>num_requested</code> is a rounding error. Disk is cheaper than latency.",
+        "Set <code>checkpoint_completion_target = 0.9</code> so the write spreads across the interval instead of landing as a spike.",
+        "<strong>Budget the trade deliberately:</strong> a larger <code>max_wal_size</code> means more WAL to replay after a crash. You are choosing steady-state latency over recovery time.",
+        "Raise <code>checkpoint_timeout</code> to match — a common pairing is 15 minutes with a <code>max_wal_size</code> sized to hold that much write volume."
+      ],
+      trap:"Tuning max_wal_size upward without measuring crash recovery time just moves the outage from 'slow all day' to 'slow to come back'."
+    },
+    {
+      key:"fpw", group:G_SPACE, name:"Full-page-write amplification",
+      sev:"degraded", severity:"Degraded — WAL volume multiplies", gate:null, mode:"slow", latency:95,
+      blurb:"After each checkpoint, the first write to any 8 kB page copies the whole page into WAL, not just the change. That protects against torn pages on crash. With frequent checkpoints and scattered writes, a one-byte update can cost 8 kB of log.",
+      log:'-- No log line. You see it as WAL generated per hour,\n-- growing far faster than the data actually changing.',
+      quietLog:true,
+      sql:"-- WAL bytes attributable to each statement (PG13+)\nSELECT queryid, calls, wal_records, wal_fpi,\n       pg_size_pretty(wal_bytes) AS wal_written\nFROM pg_stat_statements\nORDER BY wal_bytes DESC\nLIMIT 10;\n-- wal_fpi is the full-page-image count: that is the amplification.",
+      fixes:[
+        "Lengthen the checkpoint interval. Fewer checkpoints means fewer 'first touch after checkpoint' pages, which is where every full-page image comes from.",
+        "Cluster related writes so they hit fewer distinct pages — a wide random update pattern is the worst case here.",
+        "<strong>Do not disable <code>full_page_writes</code></strong> unless your storage genuinely guarantees atomic 8 kB writes. Almost none do, and the failure is silent corruption you find months later.",
+        "Turn on <code>wal_compression = lz4</code> (or <code>zstd</code>) — it compresses full-page images specifically, often cutting WAL volume sharply for a little CPU."
+      ],
+      trap:"This is why a benchmark run right after a checkpoint looks far worse than one run just before it. Measure across at least two full checkpoint cycles."
+    },
+
+    {
+      key:"sync-standby", group:G_LAT, name:"A synchronous standby went away",
+      sev:"outage", severity:"Total write outage", gate:"stream", mode:"stall",
+      blurb:"With synchronous_commit = on and a named synchronous standby, every commit waits for that standby to acknowledge. If it disappears, commits wait forever. Reads are perfect, the server looks healthy, every write hangs — this one fools people for a long time.",
+      log:'LOG:  standby "standby1" is now a synchronous standby with priority 1\nLOG:  could not receive data from client: Connection reset by peer\nLOG:  terminating walsender process due to replication timeout\n-- and then silence, while every commit blocks on SyncRep',
+      sql:"-- Backends stuck waiting for a remote acknowledgement\nSELECT pid, state, wait_event_type, wait_event,\n       now() - xact_start AS stuck_for\nFROM pg_stat_activity\nWHERE wait_event = 'SyncRep';\n\n-- Who is supposed to acknowledge, and is anyone?\nSHOW synchronous_standby_names;\nSELECT application_name, state, sync_state FROM pg_stat_replication;",
+      fixes:[
+        "<strong>Immediate relief:</strong> <code>ALTER SYSTEM SET synchronous_standby_names = '';</code> then <code>SELECT pg_reload_conf();</code> — commits unblock at once. No restart needed.",
+        "Understand what you just did: you traded guaranteed zero data loss for availability. Usually the right call mid-outage, and it must be a conscious one.",
+        "Prevent the recurrence with quorum: <code>ANY 1 (s1, s2)</code> survives losing either standby. A single named standby is a single point of failure <em>for writes on the primary</em>.",
+        "Never run synchronous replication with exactly one standby unless a write outage is genuinely preferable to losing a transaction."
+      ],
+      trap:"Monitoring that only checks 'can I SELECT?' reports this instance as perfectly healthy while the entire application is frozen."
+    },
+    {
+      key:"fsync-slow", group:G_LAT, name:"Slow fsync on the WAL volume",
+      sev:"degraded", severity:"Degraded — every commit pays", gate:"flush", mode:"slow", latency:840,
+      blurb:"A commit is not a commit until WAL is durably on disk. When the WAL volume's fsync is slow — a noisy neighbour, a degraded array, a network volume — every write transaction in the system pays that cost, no matter how well tuned the query is.",
+      log:'LOG:  duration: 2841.203 ms  statement: COMMIT\n-- with pg_stat_activity dominated by:\n--   IO / WALSync   and   LWLock / WALWrite',
+      sql:"-- Where is time actually going right now?\nSELECT wait_event_type, wait_event, count(*) AS backends\nFROM pg_stat_activity\nWHERE state = 'active'\nGROUP BY 1, 2\nORDER BY backends DESC;\n\n-- From the shell, measure the storage directly:\n--   pg_test_fsync -f $PGDATA/pg_wal/testfile",
+      fixes:[
+        "Put <code>pg_wal</code> on its own fast, low-latency volume. This is the one place where storage latency converts directly into application latency.",
+        "Check that a write cache has not been silently disabled, and that the volume is not a network mount doing fsync over the wire.",
+        "<strong><code>synchronous_commit = off</code> is a real option</strong> — commits return before flush, at the cost of losing the last few hundred milliseconds on a crash. Per-transaction, for workloads that tolerate it, this is legitimate. Globally by default, it is a decision someone must sign off on.",
+        "For many small concurrent commits, <code>commit_delay</code> with <code>commit_siblings</code> can batch flushes and raise throughput."
+      ],
+      trap:"Query tuning cannot fix this. If fsync takes 40 ms, your fastest possible write transaction takes 40 ms."
+    },
+
+    {
+      key:"replay-lag", group:G_REP, name:"The replica cannot keep up",
+      sev:"risk", severity:"At risk — RPO drifting", gate:null, mode:"slow", latency:60,
+      blurb:"WAL replay on a standby is essentially single-threaded, while the primary generates WAL from many backends at once. A write-heavy primary can outrun a replica indefinitely — quietly destroying both read-replica freshness and your failover RPO.",
+      log:'-- Nothing in the log. Lag is something you have to go and measure.',
+      quietLog:true,
+      sql:"-- On the replica: how stale is the data being served?\nSELECT now() - pg_last_xact_replay_timestamp() AS replay_delay;\n\n-- On the primary: where each replica is, and which phase lags\nSELECT application_name, state, sync_state,\n       write_lag, flush_lag, replay_lag,\n       pg_size_pretty(pg_wal_lsn_diff(sent_lsn, replay_lsn)) AS behind\nFROM pg_stat_replication;",
+      fixes:[
+        "Compare <code>write_lag</code>, <code>flush_lag</code> and <code>replay_lag</code>. If the first two are small and replay is large, the replica's <strong>redo</strong> is the bottleneck, not the network.",
+        "Enable <code>recovery_prefetch = on</code> (PG15+). It prefetches referenced blocks during redo and often helps substantially on IO-bound replicas.",
+        "Give the replica storage at least as fast as the primary's. A 'cheap replica' is a replica you cannot fail over to.",
+        "Reduce WAL volume at the source — <code>wal_compression</code>, fewer checkpoints and less write amplification all shrink what redo has to chew through."
+      ],
+      trap:"Lag in bytes and lag in seconds tell different stories. A replica idle at 0 bytes behind still reports growing time-lag when the primary is silent — alert on both."
+    },
+    {
+      key:"recovery-conflict", group:G_REP, name:"Queries cancelled by recovery",
+      sev:"degraded", severity:"Degraded — reads fail intermittently", gate:null, mode:"slow", latency:40,
+      blurb:"Replay needs to remove a row version a query on the replica is still reading. One of them has to lose. By default, after max_standby_streaming_delay, the query is cancelled — so your reporting replica randomly kills long queries.",
+      log:'ERROR:  canceling statement due to conflict with recovery\nDETAIL:  User query might have needed to see row versions that must be removed.',
+      sql:"-- What kind of conflicts, and how many?\nSELECT datname, confl_tablespace, confl_lock, confl_snapshot,\n       confl_bufferpin, confl_deadlock\nFROM pg_stat_database_conflicts\nWHERE datname = current_database();",
+      fixes:[
+        "<code>hot_standby_feedback = on</code> — the replica tells the primary which rows it still needs. <strong>Cost:</strong> the primary cannot vacuum them, so the pain moves to bloat on the primary.",
+        "Or raise <code>max_standby_streaming_delay</code> — replay waits instead of cancelling. <strong>Cost:</strong> replication lag grows for the length of your longest query.",
+        "There is no third option. You are choosing which of the three — cancelled queries, primary bloat, or replica lag — your workload tolerates best.",
+        "For a reporting replica a generous delay is usually right; for a failover target it usually is not."
+      ],
+      trap:"Turn on hot_standby_feedback, then leave an idle-in-transaction session open on the replica, and you will block vacuum on the primary indefinitely."
+    },
+    {
+      key:"segment-removed", group:G_REP, name:"Requested WAL segment already removed",
+      sev:"degraded", severity:"Degraded — replica is dead", gate:null, mode:"static",
+      blurb:"A replica was offline longer than the primary's retention. With no slot and no archive to fall back on, the segments it needs have already been recycled. It cannot catch up and will never reconnect on its own.",
+      log:'FATAL:  could not receive data from WAL stream:\n  ERROR:  requested WAL segment 0000000100000005000000A3 has already been removed',
+      sql:"-- What is the primary still holding, and from where?\nSELECT slot_name, active, restart_lsn, wal_status\nFROM pg_replication_slots;\n\nSHOW wal_keep_size;\nSHOW max_slot_wal_keep_size;\n\n-- Is there an archive that still has it?\nSHOW archive_command;",
+      fixes:[
+        "If you archive WAL, set <code>restore_command</code> on the replica so it fetches the missing segments from the archive and catches up without a rebuild.",
+        "<strong>Use a replication slot</strong> so this cannot happen — paired with <code>max_slot_wal_keep_size</code> so the slot cannot kill the primary instead.",
+        "<code>wal_keep_size</code> is the cruder alternative: a fixed reserve that covers short replica outages without pinning the log indefinitely.",
+        "If neither applies, rebuild with <code>pg_basebackup</code>. Accept that early rather than losing an hour to recovery attempts."
+      ],
+      trap:"This is the failure mode max_slot_wal_keep_size deliberately creates. That is the point — it sacrifices the replica instead of the primary."
+    },
+    {
+      key:"senders", group:G_REP, name:"max_wal_senders exhausted",
+      sev:"degraded", severity:"Degraded — replicas cannot attach", gate:null, mode:"static",
+      blurb:"Every streaming replica, every logical subscriber and every pg_basebackup consumes a walsender. When a replica flaps, its old walsender lingers until the timeout expires — so a reconnecting replica can find no slot free and stay disconnected while WAL piles up behind its slot.",
+      log:'FATAL:  number of requested standby connections exceeds max_wal_senders (currently 10)',
+      sql:"-- Who is holding a sender right now, and since when?\nSELECT pid, application_name, state, backend_start,\n       now() - backend_start AS connected_for\nFROM pg_stat_replication\nORDER BY backend_start;\n\nSHOW max_wal_senders;\nSHOW wal_sender_timeout;\nSHOW max_replication_slots;",
+      fixes:[
+        "Size <code>max_wal_senders</code> for <strong>replicas + logical subscribers + concurrent base backups + headroom for reconnects</strong>, not just the number of replicas you have.",
+        "Lower <code>wal_sender_timeout</code> so a dead sender is reaped before the replica tries to reconnect. The default 60s is often too slow for a flapping link.",
+        "Since PG12 walsenders no longer count against <code>max_connections</code>, but slots still need <code>max_replication_slots</code> — raise both together or you swap one error for another.",
+        "<strong>Both settings need a restart.</strong> Set them with headroom now rather than scheduling one during an incident."
+      ],
+      trap:"A replica that cannot attach is still holding its slot, so WAL retention keeps growing on the primary the whole time it is locked out. This failure feeds the disk-full one."
+    },
+    {
+      key:"rpo-gap", group:G_REP, name:"Async failover loses committed transactions",
+      sev:"outage", severity:"Outage — silent data loss", gate:null, mode:"static",
+      blurb:"With asynchronous replication, the primary acknowledges a commit before the replica has it. Promote that replica and every transaction still in flight is simply gone — no error, no log line, no way to tell which ones. Your RPO is whatever the lag happened to be at that instant.",
+      log:'LOG:  received promote request\nLOG:  redo done at 0/7C4A19E0\nLOG:  selected new timeline ID: 3\nLOG:  archive recovery complete\n-- Nothing here tells you what was lost. Nothing ever will.',
+      sql:"-- Measure your real RPO continuously, BEFORE you need it\nSELECT application_name, sync_state,\n       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), flush_lsn))\n         AS unflushed_on_replica,\n       flush_lag, replay_lag\nFROM pg_stat_replication;\n\n-- Right before a planned failover, confirm it has drained:\n--   this should read 0 bytes before you promote\nSELECT pg_wal_lsn_diff(pg_current_wal_lsn(), flush_lsn) AS bytes_at_risk\nFROM pg_stat_replication WHERE application_name = 'standby1';",
+      fixes:[
+        "For a <strong>planned</strong> failover, stop writes and wait for <code>bytes_at_risk</code> to reach zero before promoting. Most 'data loss on failover' is really 'nobody waited'.",
+        "For an <strong>unplanned</strong> one, you cannot recover what never arrived. Capture the old primary's WAL before it is touched — it is the only record of the lost transactions.",
+        "If specific transactions must never be lost, set <code>synchronous_commit</code> per transaction on those alone. You pay the latency only where it buys something.",
+        "<strong>Alert on the gap, not just on lag.</strong> A replica 40 MB behind is a 40 MB data-loss window that nobody has agreed to."
+      ],
+      trap:"A runbook that promises 'zero data loss' means nothing unless <code>synchronous_commit</code> is on <em>and</em> a standby is in <code>sync</code> state at that moment. Check <code>pg_stat_replication.sync_state</code>, not the runbook."
+    },
+    {
+      key:"logical-xmin", group:G_REP, name:"A logical slot is blocking vacuum",
+      sev:"degraded", severity:"Degraded — bloat on the primary", gate:null, mode:"static",
+      blurb:"A logical replication slot pins more than WAL: it holds back catalog_xmin so decoding can still resolve old row versions. A stuck or slow subscriber therefore stops vacuum from cleaning up on the primary — tables bloat, plans degrade, and the WAL retention alert never fires.",
+      log:'-- Silent. The symptom is VACUUM running and removing nothing:\nINFO:  vacuuming "public.orders"\nINFO:  "orders": found 0 removable, 4821903 nonremovable row versions\nDETAIL:  4102118 dead row versions cannot be removed yet, oldest xmin: 91422033',
+      sql:"-- Which slot is holding the oldest catalog xmin?\nSELECT slot_name, plugin, active, wal_status,\n       catalog_xmin, age(catalog_xmin) AS xmin_age,\n       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn))\n         AS undecoded\nFROM pg_replication_slots\nWHERE slot_type = 'logical'\nORDER BY age(catalog_xmin) DESC;\n\n-- Confirm the bloat it is causing\nSELECT relname, n_live_tup, n_dead_tup, last_autovacuum\nFROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 10;",
+      fixes:[
+        "Find out why the subscriber stopped consuming — a failed apply worker, a conflict on the subscriber, a dropped network path. The slot is a symptom.",
+        "If the subscriber is abandoned, drop the slot. Until you do, no amount of vacuum tuning will reclaim those rows.",
+        "<strong><code>max_slot_wal_keep_size</code> does not protect you here.</strong> It caps WAL retention only; catalog_xmin keeps advancing backwards regardless, so the disk stays fine while the tables rot.",
+        "Alert on <code>age(catalog_xmin)</code> per logical slot as a first-class metric, separately from slot WAL lag."
+      ],
+      trap:"This is the one slot failure your pg_wal disk-usage alert will never catch. The log directory looks healthy the entire time vacuum is being blocked."
+    },
+    {
+      key:"timeline", group:G_REP, name:"Timeline divergence after failover",
+      sev:"degraded", severity:"Degraded — split history", gate:null, mode:"static",
+      blurb:"A replica was promoted, which starts a new timeline. The old primary — which may have accepted writes the new one never saw — cannot simply stream from it, because their histories forked. Rejoining it naively would silently destroy data.",
+      log:'FATAL:  requested timeline 3 is not a child of this server\'s history\nDETAIL:  Latest checkpoint is at 0/8A000028 on timeline 2, but in the history\n  of the requested timeline, the server forked off from that timeline at\n  0/89FFE120.',
+      sql:"-- Which timeline is each side on?\nSELECT timeline_id, redo_lsn FROM pg_control_checkpoint();\n\n-- Prerequisite for pg_rewind — one of these must be true:\nSHOW wal_log_hints;              -- must be on, or...\nSHOW data_checksums;             -- ...checksums must be enabled",
+      fixes:[
+        "<code>pg_rewind</code> rewinds the old primary to the fork point so it can follow the new one. It needs <code>wal_log_hints = on</code> or data checksums — <strong>decide that at initdb time, not during an incident.</strong>",
+        "Shut the old primary down cleanly first. <code>pg_rewind</code> refuses to work on an unclean data directory, and forcing it is how people lose data.",
+        "Keep the fork point. The old primary may hold committed transactions the new one never received; extract them before rewinding if they matter.",
+        "Without either prerequisite, the only safe path is a full rebuild from the new primary."
+      ],
+      trap:"Never let two nodes believe they are primary. Fencing is not optional — a split brain across timelines is the one WAL problem with no clean recovery."
+    },
+
+    {
+      key:"corruption", group:G_INT, name:"Invalid WAL record on recovery",
+      sev:"outage", severity:"Outage — possible data loss", gate:null, mode:"corrupt",
+      blurb:"Recovery stops partway through the log. Some of these messages are benign — the normal end of WAL looks like a truncated record. Others mean the log is damaged, and the difference decides whether you have a five-minute problem or a restore from backup.",
+      log:'-- Usually benign: this is what the end of the log looks like\nLOG:  invalid record length at 0/1A2B3C48: wanted 24, got 0\n\n-- Not benign: the record is there and it is wrong\nFATAL:  incorrect resource manager data checksum in record at 0/1A2B3C48\nPANIC:  could not locate a valid checkpoint record',
+      sql:"-- Read the log around the failure point before touching anything:\n--   pg_waldump -s 0/1A2B0000 -e 0/1A2C0000 \\\n--     $PGDATA/pg_wal/000000010000000000000023\n\n-- Confirm what the control file believes:\nSELECT * FROM pg_control_checkpoint();\nSELECT * FROM pg_control_recovery();",
+      fixes:[
+        "<strong>Take a byte-for-byte copy of the data directory before anything else.</strong> Every option below is easier to retry from a copy and impossible to undo without one.",
+        "The correct fix is almost always restore from backup and replay to just before the bad record — point-in-time recovery. That is what the archive is for.",
+        "<code>pg_resetwal</code> does <strong>not</strong> repair anything. It throws the log away so the server will start, leaving the data files in an unknown, possibly inconsistent state.",
+        "If you use it as a genuine last resort, treat the result as a corpse to extract data from with <code>pg_dump</code> — not as a database to resume serving traffic."
+      ],
+      trap:"An 'invalid record length' at the very end of the log during normal crash recovery is expected and harmless. Check whether recovery continued past it before escalating."
+    },
+    {
+      key:"wal-level", group:G_INT, name:"wal_level is too low",
+      sev:"risk", severity:"Blocked — restart required", gate:null, mode:"static",
+      blurb:"WAL contains only what wal_level tells it to record. Set too low, logical replication cannot start and — worse — your physical backups may not be restorable. It is one of the few parameters that cannot be changed without a restart.",
+      log:'ERROR:  logical decoding requires wal_level >= logical\n\n-- or, the one that ruins a recovery:\nFATAL:  WAL was generated with wal_level=minimal, cannot continue recovering\nHINT:  This happens if you temporarily set wal_level=minimal on the server.',
+      sql:"SHOW wal_level;       -- minimal | replica | logical\n\n-- What depends on it right now?\nSELECT count(*) AS logical_slots\nFROM pg_replication_slots WHERE slot_type = 'logical';\nSELECT count(*) AS replicas FROM pg_stat_replication;",
+      fixes:[
+        "<code>replica</code> is the default and the right answer for almost everyone: it supports physical replication and archive-based recovery.",
+        "<code>logical</code> adds what logical decoding needs, at the cost of somewhat more WAL. Set it before you need it, so you are not scheduling a restart under pressure.",
+        "<strong><code>minimal</code> is a trap.</strong> It skips records archive recovery requires — any backup taken across a window of <code>minimal</code> may be unrestorable.",
+        "<code>ALTER SYSTEM SET wal_level = 'logical';</code> then restart. A reload is not enough, and no amount of retrying will make it be."
+      ],
+      trap:"Someone setting wal_level=minimal to speed up a bulk load has silently broken your point-in-time recovery for that entire window."
+    },
+    {
+      key:"long-recovery", group:G_INT, name:"Crash recovery takes too long",
+      sev:"risk", severity:"At risk — RTO blown", gate:null, mode:"static",
+      blurb:"After a crash, PostgreSQL replays every WAL record since the last checkpoint before accepting connections. The larger max_wal_size is, the more there is to replay. The setting that smoothed out your checkpoint spikes is the same one that decides how long a restart takes.",
+      log:'LOG:  database system was not properly shut down; automatic recovery in progress\nLOG:  redo starts at 0/4A000028\n-- ...eleven minutes of silence, no connections accepted...\nLOG:  redo done at 0/7C4A19E0, elapsed time: 661.02 s',
+      sql:"-- How much WAL would have to be replayed from the last checkpoint?\nSELECT pg_size_pretty(\n         pg_wal_lsn_diff(pg_current_wal_lsn(), checkpoint_lsn)\n       ) AS replay_backlog\nFROM pg_control_checkpoint();\n\nSHOW max_wal_size;\nSHOW checkpoint_timeout;",
+      fixes:[
+        "Measure it honestly: divide the replay backlog by your replica's observed redo throughput. That number is your real recovery time objective.",
+        "Lower <code>max_wal_size</code> and <code>checkpoint_timeout</code> to shorten recovery — accepting more frequent checkpoints and more full-page writes in exchange.",
+        "<code>recovery_prefetch = on</code> (PG15+) speeds up redo on IO-bound systems and costs nothing to try.",
+        "<strong>The real fix is usually a replica.</strong> Failing over in thirty seconds beats optimising an eleven-minute replay you hope never to perform."
+      ],
+      trap:"Checkpoint tuning is a single dial with your name on both ends: steady-state latency at one end, recovery time at the other. No setting wins both."
+    }
+  ];
+
+  var SEV_CLASS = {outage:"sev-out", degraded:"sev-deg", risk:"sev-risk"};
+
+  var state = {
+    segs:[], nextSeg:0x23, lsn:0x23000000, running:true,
+    scenario:SCENARIOS[0], fixed:false, panic:false, latency:1.8
+  };
+
+  function $(id){ return document.getElementById(id); }
+  function el(tag, cls, text){
+    var e = document.createElement(tag);
+    if(cls) e.className = cls;
+    if(text != null) e.textContent = text;
+    return e;
+  }
+  var tapeEl=$("tape"), listEl=$("list"), detailEl=$("detail"), lanesEl=$("lanes");
+
+  function segName(n){
+    var hi = ("00000000" + Math.floor(n/256).toString(16).toUpperCase()).slice(-8);
+    var lo = ("00000000" + (n%256).toString(16).toUpperCase()).slice(-8);
+    return "00000001" + hi + lo;
+  }
+  function lsnStr(v){ return "0/" + ("00000000" + v.toString(16).toUpperCase()).slice(-8); }
+  function isFrozen(sc){ return sc.mode === "static" || sc.mode === "corrupt"; }
+
+  function reset(){
+    var sc = state.scenario;
+    state.segs = []; state.nextSeg = 0x23; state.lsn = 0x23000000;
+    state.fixed = false; state.panic = false; state.latency = 1.8;
+    if(sc.startFull){
+      for(var j=0;j<CAP_SEGS;j++) state.segs.push({id:state.nextSeg++, stage:2});
+      state.panic = true; state.running = false;
+    } else {
+      for(var i=0;i<10;i++) state.segs.push({id:state.nextSeg++, stage:Math.min(4, 1 + ((i/2)|0))});
+      state.running = !isFrozen(sc);
+    }
+    render();
+  }
+
+  function blockedGate(){
+    var sc = state.scenario;
+    return (state.fixed || !sc.gate) ? null : sc.gate;
+  }
+
+  function step(){
+    var sc = state.scenario;
+    if(!state.running || state.panic || isFrozen(sc)) return;
+    var gate = blockedGate();
+
+    var kept = [];
+    for(var i=0;i<state.segs.length;i++){
+      var s = state.segs[i];
+      if(s.stage < 5 && STAGES[s.stage] !== gate){
+        if(!(sc.mode === "slow" && !state.fixed && Math.random() < 0.45)) s.stage++;
+      }
+      if(s.stage < 5) kept.push(s);
+    }
+    state.segs = kept;
+
+    var rate = (sc.mode === "stall" && !state.fixed) ? 1 : 2;
+    for(var k=0;k<rate;k++){
+      state.segs.push({id:state.nextSeg++, stage:0});
+      state.lsn += 0x1000000;
+      if(state.lsn > 0xF0000000) state.lsn = 0x1000000;
+    }
+
+    var target = 1.8;
+    if(!state.fixed){
+      if(sc.mode === "stall") target = -1;
+      else if(sc.mode === "slow") target = sc.latency || 100;
+    }
+    if(target < 0){ state.latency = -1; }
+    else {
+      if(state.latency < 0) state.latency = target;
+      state.latency += (target - state.latency) * 0.3;
+    }
+
+    if(state.segs.length >= CAP_SEGS){
+      state.segs = state.segs.slice(0, CAP_SEGS);
+      state.panic = true;
+      state.running = false;
+    }
+    render();
+  }
+
+  function render(){
+    var sc = state.scenario, gate = blockedGate();
+    var held = state.segs.length;
+    var pct = Math.min(100, (held / CAP_SEGS) * 100);
+    var frozen = isFrozen(sc);
+    var n, d;
+
+    var pill = $("pill"), txt = $("pill-text"), cls = "ok";
+    if(state.panic) cls = "panic";
+    else if(!state.fixed && (gate || frozen || sc.mode === "slow")) cls = "hold";
+    pill.className = "pill " + cls;
+
+    if(state.panic) txt.textContent = "PANIC: shut down";
+    else if(state.fixed) txt.textContent = "Recovering";
+    else if(sc.mode === "corrupt") txt.textContent = "Recovery halted";
+    else if(sc.mode === "static") txt.textContent = "Broken, no auto-recovery";
+    else if(gate) txt.textContent = STAGE_LABEL[gate] + " gate held";
+    else if(sc.mode === "slow") txt.textContent = "Degraded";
+    else txt.textContent = "Healthy";
+    $("now").textContent = sc.name;
+
+    $("r-lsn").textContent = lsnStr(state.lsn);
+    $("r-seg").textContent = held ? segName(state.segs[0].id) : "—";
+    var cEl = $("r-count");
+    cEl.textContent = held + (held >= CAP_SEGS ? " (full)" : "");
+    cEl.className = "v" + (pct > 85 ? " bad" : pct > 55 ? " warn" : "");
+    var lEl = $("r-lat");
+    if(state.latency < 0){ lEl.textContent = "blocked"; lEl.className = "v bad"; }
+    else {
+      lEl.textContent = state.latency.toFixed(1) + " ms";
+      lEl.className = "v" + (state.latency > 300 ? " bad" : state.latency > 20 ? " warn" : "");
+    }
+
+    var fill = $("g-fill");
+    fill.style.width = pct + "%";
+    fill.className = "gauge-fill" + (pct > 85 ? " bad" : pct > 55 ? " warn" : "");
+    $("g-text").textContent = (held * SEG_MB) + " MB / " + CAP_MB + " MB";
+
+    /* tape */
+    tapeEl.textContent = "";
+    if(sc.mode === "corrupt"){
+      for(n=0;n<26;n++){ tapeEl.appendChild(el("div","seg " + (n===17?"corrupt":"s4"))); }
+      $("t-note").textContent = "replay stops at the damaged record";
+    } else if(sc.mode === "static"){
+      for(n=0;n<20;n++){ tapeEl.appendChild(el("div","seg s" + (n<13?"4":"1"))); }
+      $("t-note").textContent = "no flow, see diagnosis";
+    } else if(!held){
+      tapeEl.appendChild(el("div","tape-empty","all segments recycled"));
+      $("t-note").textContent = "flowing";
+    } else {
+      var show = Math.min(held, 96);
+      for(n=0;n<show;n++){
+        var s = state.segs[n];
+        tapeEl.appendChild(el("div","seg " + ((gate && STAGES[s.stage] === gate) ? "held" : "s" + Math.max(1, s.stage))));
+      }
+      if(held > 96) tapeEl.appendChild(el("div","tape-empty","+" + (held-96)));
+      $("t-note").textContent = state.panic ? "no space left on device"
+        : gate ? "held at " + STAGE_LABEL[gate].toLowerCase()
+        : state.fixed ? "draining" : "flowing";
+    }
+
+    /* lanes: live count of segments sitting in each stage */
+    var counts = [0,0,0,0,0];
+    state.segs.forEach(function(sg){ counts[Math.min(4, sg.stage)]++; });
+    lanesEl.textContent = "";
+    for(n=0;n<STAGES.length;n++){
+      var nm = STAGES[n], lcls = "lane", st = "passing", ct = String(counts[n]);
+      if(state.panic && nm === "write"){ lcls += " dead"; st = "PANIC"; }
+      else if(gate === nm){ lcls += " blocked"; st = "held"; }
+      else if(frozen){ st = "idle"; ct = "—"; }
+      d = el("div", lcls);
+      d.appendChild(el("div","nm",STAGE_LABEL[nm]));
+      d.appendChild(el("div","ct",ct));
+      d.appendChild(el("div","st",st));
+      lanesEl.appendChild(d);
+    }
+
+    var fixBtn = $("btn-fix");
+    fixBtn.disabled = state.fixed || frozen;
+    fixBtn.textContent = state.fixed ? "Fix applied" : "Apply fix";
+    $("btn-play").disabled = frozen || state.panic;
+    $("btn-play").textContent = state.running ? "Pause" : "Play";
+  }
+
+  function buildList(){
+    var order = [], byGroup = {}, n = 0;
+    SCENARIOS.forEach(function(s){
+      if(!byGroup[s.group]){ byGroup[s.group] = []; order.push(s.group); }
+      byGroup[s.group].push(s);
+    });
+    listEl.textContent = "";
+
+    var legend = el("div","legend");
+    [["sev-out","Outage"],["sev-deg","Degraded"],["sev-risk","At risk"]].forEach(function(p){
+      var sp = el("span");
+      sp.appendChild(el("i","dot " + p[0]));
+      sp.appendChild(document.createTextNode(p[1]));
+      legend.appendChild(sp);
+    });
+    listEl.appendChild(legend);
+
+    order.forEach(function(gname){
+      var grp = el("div","grp");
+      grp.appendChild(el("h3", null, gname));
+      var items = el("div","items");
+      byGroup[gname].forEach(function(sc){
+        n++;
+        var b = el("button","item");
+        b.type = "button";
+        b.setAttribute("data-key", sc.key);
+        b.setAttribute("aria-current", sc === state.scenario ? "true" : "false");
+        b.appendChild(el("i","dot " + SEV_CLASS[sc.sev]));
+        b.appendChild(el("span", null, sc.name));
+        b.addEventListener("click", function(){ select(sc.key, true); });
+        items.appendChild(b);
+      });
+      grp.appendChild(items);
+      listEl.appendChild(grp);
+    });
+  }
+
+  function select(key, fromUser){
+    var sc = null;
+    for(var i=0;i<SCENARIOS.length;i++){ if(SCENARIOS[i].key === key) sc = SCENARIOS[i]; }
+    if(!sc) return;
+    state.scenario = sc;
+    reset();
+    var btns = listEl.querySelectorAll(".item");
+    for(var j=0;j<btns.length;j++){
+      btns[j].setAttribute("aria-current", btns[j].getAttribute("data-key") === key ? "true" : "false");
+    }
+    renderDetail();
+    if(fromUser){
+      try{ history.replaceState(null, "", "#" + key); }catch(e){}
+      if(window.innerWidth <= 960){
+        var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        try{ $("console").scrollIntoView({behavior: reduce ? "auto" : "smooth", block:"start"}); }catch(e){}
+      }
+    }
+  }
+
+  function renderDetail(){
+    var sc = state.scenario;
+    detailEl.textContent = "";
+
+    var head = el("div","d-head");
+    var chips = el("div","chips");
+    chips.appendChild(el("span","chip " + SEV_CLASS[sc.sev], sc.severity));
+    chips.appendChild(el("span","chip", sc.gate ? STAGE_LABEL[sc.gate] + " gate held" : "No gate held"));
+    head.appendChild(chips);
+    head.appendChild(el("h3", null, sc.name));
+    head.appendChild(el("p", null, sc.blurb));
+    detailEl.appendChild(head);
+
+    var b1 = el("div","block");
+    b1.appendChild(el("div","k","What you see in the log"));
+    b1.appendChild(el("pre","log" + (sc.quietLog ? " quiet" : ""), sc.log));
+    detailEl.appendChild(b1);
+
+    var b2 = el("div","block");
+    b2.appendChild(el("div","k","Diagnose it"));
+    var box = el("div","code");
+    var pre = el("pre", null, sc.sql);
+    var cp = el("button","copy","Copy");
+    cp.type = "button";
+    cp.addEventListener("click", function(){
+      var done = function(label){ cp.textContent = label; setTimeout(function(){ cp.textContent = "Copy"; }, 1600); };
+      var fallback = function(){
+        try{
+          var r = document.createRange(); r.selectNodeContents(pre);
+          var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+          done("Selected");
+        }catch(e){}
+      };
+      try{
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(sc.sql).then(function(){ done("Copied"); }, fallback);
+        } else fallback();
+      }catch(e){ fallback(); }
+    });
+    box.appendChild(pre); box.appendChild(cp);
+    b2.appendChild(box);
+    detailEl.appendChild(b2);
+
+    var b3 = el("div","block");
+    b3.appendChild(el("div","k","Fix it, and what each fix costs"));
+    var ul = el("ul","fixlist");
+    sc.fixes.forEach(function(f){
+      var li = document.createElement("li");
+      var sp = document.createElement("span");
+      sp.innerHTML = f;
+      li.appendChild(sp);
+      ul.appendChild(li);
+    });
+    b3.appendChild(ul);
+    detailEl.appendChild(b3);
+
+    var b4 = el("div","block");
+    b4.appendChild(el("div","k","The part that catches people"));
+    var trap = el("div","trap");
+    trap.appendChild(el("span","mark","!"));
+    var tp = document.createElement("p");
+    tp.innerHTML = sc.trap;
+    trap.appendChild(tp);
+    b4.appendChild(trap);
+    detailEl.appendChild(b4);
+  }
+
+  $("btn-play").addEventListener("click", function(){
+    if(state.panic) return;
+    state.running = !state.running;
+    render();
+  });
+  $("btn-reset").addEventListener("click", reset);
+  $("btn-fix").addEventListener("click", function(){
+    state.fixed = true;
+    state.panic = false;
+    state.running = true;
+    if(state.segs.length > CAP_SEGS - 24) state.segs = state.segs.slice(0, CAP_SEGS - 40);
+    render();
+  });
+
+  var start = null;
+  try{ start = decodeURIComponent((location.hash || "").slice(1)); }catch(e){}
+  for(var q=0;q<SCENARIOS.length;q++){ if(SCENARIOS[q].key === start) state.scenario = SCENARIOS[q]; }
+
+  buildList();
+  reset();
+  renderDetail();
+  setInterval(step, 340);
+})();
+</script>
+
+</body>
+</html>
